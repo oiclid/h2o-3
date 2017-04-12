@@ -768,7 +768,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
           colCount = (int) _train.numRows();
           fr = generateFrameOfZeros(_ncolA, colCount);
           xwF = new water.util.ArrayUtils().frame(transpose(yinit));
-          xwF.add(generateFrameOfZeros((int) xwF.numRows(), _parms._k));
+          xwF.add(new water.util.ArrayUtils().frame(transpose(yinit)));
 
           new DMatrix.TransposeTsk(fr).doAll(dinfo._adaptedFrame.subframe(0, _ncolA));
 
@@ -1704,8 +1704,8 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 						_normMul = normMul;
 				}
 
-				private Chunk chk_xnew(Chunk[] chks, int c) {
-						return chks[_ncolA + _ncolX + c];
+				private Chunk xFrameVec(Chunk[] chks, int c, int offset) {
+						return chks[offset + c];
 				}
 
 				@SuppressWarnings("ConstantConditions")  // The method is too complex
@@ -1738,7 +1738,11 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
         tARow = rowIndex+tArowStart;  // true row index of T(A)
         if (tARow < _ncats)  { // dealing with categorical columns now
           // perform comparison for categoricals
-          int catRowLevel = _yt._numLevels[tARow];    // number of bits to expand a categorical colum
+          int catRowLevel = _yt._numLevels[tARow];    // number of bits to expand a categorical columns
+
+          if (_regX) {
+            calXOldReg(xChunks, xrow, xChunkRowStart, _yt._catOffsets[tARow], catRowLevel, xChunkSize);
+          }
 
           for (int colIndex = 0; colIndex < cs.length; colIndex++) {  // look at one element of T(A)
             double a = cs[colIndex].atd(rowIndex);    // grab an element of T(A)
@@ -1747,9 +1751,9 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
             Arrays.fill(xy, 0, catRowLevel,0);   // reset before next accumulated sum
 
             for (int level=0; level < catRowLevel; level++) { // one element of T(A) composed of several of XY
-              xRow = level+_yt._catOffsets[tARow];
+              xRow = level+_yt._catOffsets[tARow]-xChunkRowStart; // relative row
 
-              if (xRow > xChunkSize) {  // load in new chunk of xFrame
+              if (xRow >= xChunkSize) {  // load in new chunk of xFrame
                 if (xChunkIndices.size() < 1) {
                   error("GLRM train", "Chunks mismatch between A transpose and X frame.");
                 } else {
@@ -1757,26 +1761,21 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
                   xChunkRowStart = (int) xChunks[0].start();   // first row index of xFrame
                   xChunkSize = (int) xChunks[0]._len;   // number of rows in xFrame
+                  xRow = level+_yt._catOffsets[tARow]-xChunkRowStart;
                 }
               }
-
-              if (xRow <= xChunkSize) { // xFrame contains row to compare
-                for (int innerCol = 0; innerCol < _parms._k; innerCol++) {
-                  xy[level] += xChunks[innerCol].atd(xRow) * _yt._archetypes[colIndex][innerCol];
-                }
+              for (int innerCol = 0; innerCol < _parms._k; innerCol++) {
+                xy[level] += xFrameVec(xChunks, innerCol, _parms._k).atd(xRow) * _yt._archetypes[colIndex][innerCol];
               }
             }
             _loss += chkweight[colIndex]*_lossFunc[tARow].mloss(xy, (int)a, catRowLevel);
           }
 
         } else {  // looking into numerical columns here
-          if (_yt._catOffsets[_ncats]+rowIndex < xChunkRowStart) {
-            continue;
-          }
           // perform comparison for numericals
-          xRow = rowIndex+_yt._catOffsets[_ncats];
+          xRow = rowIndex+_yt._catOffsets[_ncats]-xChunkRowStart;
 
-          if (xRow > xChunkSize) {  // load in new chunk of xFrame
+          if (xRow >= xChunkSize) {  // load in new chunk of xFrame
             if (xChunkIndices.size() < 1) {
               error("GLRM train", "Chunks mismatch between A transpose and X frame.");
             } else {
@@ -1784,29 +1783,40 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
               xChunkRowStart = (int) xChunks[0].start();   // first row index of xFrame
               xChunkSize = (int) xChunks[0]._len;   // number of rows in xFrame
+              xRow = rowIndex+_yt._catOffsets[_ncats]-xChunkRowStart;
             }
           }
 
+          if (_regX) {
+            calXOldReg(xChunks, xrow, xChunkRowStart, _yt._catOffsets[_ncats], 1, xChunkSize);
+          }
+
           for (int colIndex=0; colIndex < cs.length; colIndex++) {
-            double a = cs[rowIndex].atd(colIndex);
+            double a = cs[colIndex].atd(rowIndex);
             if (Double.isNaN(a)) continue;
             double txy = 0.0;
             for (int innerCol=0; innerCol < _parms._k; innerCol++) {
-              txy += xChunks[innerCol].atd(xRow) * _yt._archetypes[colIndex][innerCol];
+              txy += xFrameVec(xChunks, innerCol, _parms._k).atd(xRow) * _yt._archetypes[colIndex][innerCol];
             }
             _loss += chkweight[colIndex]*_lossFunc[tARow].loss(txy, (a-_normSub[tARow])*_normMul[tARow]);
           }
         }
-
-        if (_regX) {
-          for (int j = 0; j < cs.length; j++) {
-            xrow[j] = cs[j].atd(rowIndex);
-          }
-          _xold_reg += _parms._regularization_x.regularize(xrow);
-        }
       }
-
 				}
+
+				private void calXOldReg(Chunk[] chks, double[] xrow, int xChunkRowStart, int catOffsets, int catRowLevel,
+                            int xChunkSize) {
+				  for (int level=0; level < catRowLevel; level++) {
+				    int xRow = level+catOffsets-xChunkRowStart;
+				    if (xRow >= xChunkSize) {
+				      return; // done
+        }
+        for (int j = 0; j < chks.length; j++) {
+          xrow[j] = chks[j].atd(xRow);
+        }
+        _xold_reg += _parms._regularization_x.regularize(xrow);
+      }
+    }
 
 				private void getXChunk(Frame xVecs, int chunkIdx, Chunk[] xChunks) {
       for (int j = 0; j < _parms._k; ++j) {  // read in the relevant xVec chunks
@@ -1855,15 +1865,14 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
     private int findExpColIndex(int oldIndex, int numCats) {
 				  if (numCats > 0) {
-      if (oldIndex < numCats) {  // find true row start considering categorical columns
-        return _yt._catOffsets[oldIndex];
-      } else {  // taStart in the numerical columns now
-        return oldIndex-numCats+_yt._catOffsets[numCats];
-      }
+        if (oldIndex < numCats) {  // find true row start considering categorical columns
+          return _yt._catOffsets[oldIndex];
+        } else {  // taStart in the numerical columns now
+          return oldIndex-numCats+_yt._catOffsets[numCats];
+        }
 				  } else {
 				    return oldIndex;  // all numerics
       }
-
     }
 
 				private double regularizationTermOldX(Chunk[] cs, int row, double[] xrow, int colStart, int colEnd) {
@@ -1874,34 +1883,6 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 						}
 						assert idx == colStart;
 						return _parms._regularization_x.regularize(xrow);
-				}
-
-				private double lossDueToNumeric(Chunk[] cs, int j, int row, int offsetA) {
-						double a = cs[j].atd(row);
-						if (Double.isNaN(a)) return 0.0;   // Skip missing observations in row
-
-						// Inner product x_i * y_j
-						double txy = 0;
-						int js = j - offsetA;
-						for (int k = 0; k < _ncolX; k++)
-								txy += chk_xnew(cs, k).atd(row) * _yt.getNum(js, k);
-
-						return _lossFunc[j].loss(txy, (a - _normSub[js]) * _normMul[js]);
-				}
-
-				private double lossDueToCategorical(Chunk[] cs, int colInd, int row, double[] xy) {
-						double a = cs[colInd].atd(row);
-						if (Double.isNaN(a)) return 0.0;
-						int catColJLevel = _yt._numLevels[colInd];
-						Arrays.fill(xy, 0, catColJLevel, 0);  // reset before next accumulation sum
-
-						// Calculate x_i * Y_j where Y_j is sub-matrix corresponding to categorical col j
-						for (int level = 0; level < catColJLevel; level++) {  // level index into extra columns due to categoricals.
-								for (int k = 0; k < _ncolX; k++) {
-										xy[level] += chk_xnew(cs, k).atd(row) * _yt.getCat(colInd, level, k);
-								}
-						}
-						return _lossFunc[colInd].mloss(xy, (int)a, catColJLevel);
 				}
 
 				@Override public void reduce(ObjCalcW other) {

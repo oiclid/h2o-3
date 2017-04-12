@@ -127,7 +127,7 @@ class ActualPCATests {
 				try {
 						train = parse_test_file(Key.make(datafile), datafile);
 						Scope.track(train);
-						if (removeColumns) {
+ 						if (removeColumns) {
 								train.remove(12).remove();    // remove categorical columns
 								train.remove(11).remove();
 								train.remove(10).remove();
