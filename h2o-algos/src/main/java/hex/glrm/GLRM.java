@@ -1718,77 +1718,94 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
       int tArowStart = (int) cs[0].start();
       int tArowEnd = (int) cs[0]._len+tArowStart-1; // last row index
       Chunk[] xChunks = new Chunk[_parms._k]; // number of columns
-      int xNChunks = xVecs.anyVec().nChunks();
       int startxcidx = cs[0].cidx();
       ArrayList<Integer> xChunkIndices= findXChunkIndices(tArowStart, tArowEnd, startxcidx);  // contains x chunks to get
       double[] xy = null;   // store the vector of categoricals for one column
+      double[] xrow = new double[_parms._k];
 
       if (_yt._numLevels[0] > 0) {
         xy = new double[_yt._numLevels[0]];   // allocate memory only if there are categoricals
       }
 
-      // loop to extract xvec data, form XY and compare with T(A) value
-      while (xChunkIndices.size() > 0) {
-        getXChunk(xVecs, xChunkIndices.remove(0), xChunks); // get a xVec chunk
+      getXChunk(xVecs, xChunkIndices.remove(0), xChunks); // get the first xFrame chunk
+      int xChunkRowStart = (int) xChunks[0].start();   // first row index of xFrame
+      int xChunkSize = (int) xChunks[0]._len;   // number of rows in xFrame
+      int xRow = 0;
+      int tARow = 0;
+      assert ((tArowStart >= xChunkRowStart) && (tArowStart < (xChunkRowStart+xChunkSize)));  // xFrame has T(A) start
 
-        int xChunkRowStart = (int) xChunks[0].start();   // first row index of xFrame
-        int xChunkSize = (int) xChunks[0]._len;   // number of rows in xFrame
-        int xFrameRow = 0;
-        int xRow = 0;
-        int tARow = 0;
+      for (int rowIndex = 0; rowIndex <= tArowEnd; rowIndex++) {  // use indexing of T(A)
+        tARow = rowIndex+tArowStart;  // true row index of T(A)
+        if (tARow < _ncats)  { // dealing with categorical columns now
+          // perform comparison for categoricals
+          int catRowLevel = _yt._numLevels[tARow];    // number of bits to expand a categorical colum
 
-        for (int rowIndex = 0; rowIndex <= tArowEnd; rowIndex++) {  // use indexing of T(A)
-          tARow = rowIndex+tArowStart;
-          if (tARow < _ncats)  { // dealing with categorical columns now
-            if (_yt._catOffsets[rowIndex] < xChunkRowStart) {
-              continue;   // do nothing, dealing with rows of T(A) that have been processed
-            } else {      // perform comparison for categoricals
-              int catRowLevel = _yt._numLevels[rowIndex];    // this may expand into multiple xFrame row indices
+          for (int colIndex = 0; colIndex < cs.length; colIndex++) {  // look at one element of T(A)
+            double a = cs[colIndex].atd(rowIndex);    // grab an element of T(A)
+            if (Double.isNaN(a)) continue;;
 
-              for (int colIndex = 0; colIndex < cs.length; colIndex++) {  // look at one element of T(A)
-                double a = cs[rowIndex].atd(colIndex);    // grab an element of T(A)
-                if (Double.isNaN(a)) continue;
+            Arrays.fill(xy, 0, catRowLevel,0);   // reset before next accumulated sum
 
-                Arrays.fill(xy, 0, catRowLevel,0);   // reset before next accumulated sum
-                for (int level=0; level < catRowLevel; level++) { // one element of T(A) composed of several of XY
-                  xRow = level+xFrameRow++;
-                  if (xRow <= xChunkSize) { // xFrame contains row to compare
-                    for (int innerCol = 0; innerCol < _parms._k; innerCol++) {
-                      xy[level] += xChunks[innerCol].atd(xRow) * _yt._archetypes[colIndex][innerCol];
-                    }
-                  } else {  // run over xFrame, need to grab the next blob
-                    if (xChunkIndices.size() < 1) {
-                      error("GLRM train", "Chunks mismatch between A transpose and X frame.");
-                    } else {
-                      getXChunk(xVecs, xChunkIndices.remove(0), xChunks); // get a xVec chunk
+            for (int level=0; level < catRowLevel; level++) { // one element of T(A) composed of several of XY
+              xRow = level+_yt._catOffsets[tARow];
 
-                      xChunkRowStart = (int) xChunks[0].start();   // first row index of xFrame
-                      xChunkSize = (int) xChunks[0]._len;   // number of rows in xFrame
-                      xFrameRow = 0;
-                    }
-                  }
+              if (xRow > xChunkSize) {  // load in new chunk of xFrame
+                if (xChunkIndices.size() < 1) {
+                  error("GLRM train", "Chunks mismatch between A transpose and X frame.");
+                } else {
+                  getXChunk(xVecs, xChunkIndices.remove(0), xChunks); // get a xVec chunk
+
+                  xChunkRowStart = (int) xChunks[0].start();   // first row index of xFrame
+                  xChunkSize = (int) xChunks[0]._len;   // number of rows in xFrame
                 }
-                _loss += _lossFunc[tARow].mloss(xy, (int)a, catRowLevel);
+              }
+
+              if (xRow <= xChunkSize) { // xFrame contains row to compare
+                for (int innerCol = 0; innerCol < _parms._k; innerCol++) {
+                  xy[level] += xChunks[innerCol].atd(xRow) * _yt._archetypes[colIndex][innerCol];
+                }
               }
             }
-          } else {  // looking into numerical columns here
-            if (_yt._catOffsets[_ncats]+rowIndex < xChunkRowStart) {
-              continue;
-            } else {    // perform comparison for numericals
-              for (int colIndex=0; colIndex < cs.length; colIndex++) {
-                double a = cs[rowIndex].atd(colIndex);
-                if (Double.isNaN(a)) continue;
-                double txy = 0.0;
-                for (int innerCol=0; innerCol < _parms._k; innerCol++) {
-                  txy += xChunks[innerCol].atd(xRow) * _yt._archetypes[colIndex][innerCol];
-                }
-                _loss += _lossFunc[tARow].loss(txy, (a-_normSub[tARow])*_normMul[tARow]);
-                _loss *= chkweight[colIndex];     // add the weights to samples
-              }
+            _loss += chkweight[colIndex]*_lossFunc[tARow].mloss(xy, (int)a, catRowLevel);
+          }
+
+        } else {  // looking into numerical columns here
+          if (_yt._catOffsets[_ncats]+rowIndex < xChunkRowStart) {
+            continue;
+          }
+          // perform comparison for numericals
+          xRow = rowIndex+_yt._catOffsets[_ncats];
+
+          if (xRow > xChunkSize) {  // load in new chunk of xFrame
+            if (xChunkIndices.size() < 1) {
+              error("GLRM train", "Chunks mismatch between A transpose and X frame.");
+            } else {
+              getXChunk(xVecs, xChunkIndices.remove(0), xChunks); // get a xVec chunk
+
+              xChunkRowStart = (int) xChunks[0].start();   // first row index of xFrame
+              xChunkSize = (int) xChunks[0]._len;   // number of rows in xFrame
             }
           }
+
+          for (int colIndex=0; colIndex < cs.length; colIndex++) {
+            double a = cs[rowIndex].atd(colIndex);
+            if (Double.isNaN(a)) continue;
+            double txy = 0.0;
+            for (int innerCol=0; innerCol < _parms._k; innerCol++) {
+              txy += xChunks[innerCol].atd(xRow) * _yt._archetypes[colIndex][innerCol];
+            }
+            _loss += chkweight[colIndex]*_lossFunc[tARow].loss(txy, (a-_normSub[tARow])*_normMul[tARow]);
+          }
+        }
+
+        if (_regX) {
+          for (int j = 0; j < cs.length; j++) {
+            xrow[j] = cs[j].atd(rowIndex);
+          }
+          _xold_reg += _parms._regularization_x.regularize(xrow);
         }
       }
+
 				}
 
 				private void getXChunk(Frame xVecs, int chunkIdx, Chunk[] xChunks) {
@@ -1960,14 +1977,14 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
           assert !Double.isNaN(cweight) : "User-specified weight cannot be NaN";
           // Categorical columns
           for (int j = 0; j < _ncats; j++) {    // contribution from categoricals
-            _loss += lossDueToCategorical(cs, j, row, xy);
+            _loss += cweight*lossDueToCategorical(cs, j, row, xy);
           }
 
           // Numeric columns
           for (int j = _ncats; j < _ncolA; j++) {
-            _loss += lossDueToNumeric(cs, j, row, _ncats);
+            _loss += cweight*lossDueToNumeric(cs, j, row, _ncats);
           }
-          _loss *= cweight;
+    //      _loss *= cweight;
 
           // Calculate regularization term for old X if requested
           if (_regX) {
